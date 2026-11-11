@@ -27,14 +27,25 @@ Without a key (or with `--no-ai`) a local text-density heuristic is used instead
 ```
 netreader [options] <url>
 
-  -p, --print        Print to stdout instead of opening the reader (automatic when piped)
-  -r, --refresh      Ignore the cache and re-extract the page
-      --no-ai        Use the local heuristic extractor
-  -m, --model <id>   OpenRouter model (default: $NETREADER_MODEL or typesafe/jev-router)
-  -w, --width <n>    Maximum text width (default: 88)
+  -p, --print            Print to stdout instead of opening the reader (automatic when piped)
+  -r, --refresh          Ignore the cache and re-extract the page
+      --no-ai            Use the local heuristic extractor
+  -m, --model <id>       OpenRouter model (default: $NETREADER_MODEL or typesafe/jev-router)
+  -w, --width <n>        Maximum text width (default: 88)
+  -t, --tldr             Print a TL;DR of the article instead of the article
+      --tldr-model <id>  TL;DR model (default: $NETREADER_TLDR_MODEL or openai/gpt-6-luna)
 ```
 
 Reader keys: `j`/`k` or arrows to scroll, `space`/`b` page, `d`/`u` half page,
-`g`/`G` top/end, `/` search, `n`/`N` next/previous match, `q` quit.
+`g`/`G` top/end, `/` search, `n`/`N` next/previous match, `+`/`-` zoom in/out,
+`0` reset zoom, `t` TL;DR, `q` quit.
+
+`t` asks [gpt-6-luna](https://openrouter.ai/openai/gpt-6-luna) for a short summary plus key
+takeaways and opens it in place of the article; you can keep reading while it's generated.
+Press `t`, `q` or `Esc` to return to where you were. Summaries are cached too.
+
+Zoom narrows or widens the text column (a terminal program can't change the font size);
+`-w` sets the starting width. For bigger glyphs, use your terminal's own font zoom
+(e.g. `Ctrl+=`/`Ctrl+-` in foot or kitty) — the reader reflows to the new size.
 
 Extracted articles are cached in `~/.cache/netreader`.

@@ -1,4 +1,5 @@
-const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
+import { chat } from './openrouter.js';
+
 export const DEFAULT_MODEL = 'typesafe/jev-router';
 
 const SYSTEM = `You are the content-extraction engine of a terminal web reader.
@@ -53,16 +54,18 @@ export async function classifyWithJev({ blocks, meta, url, apiKey, model = DEFAU
     .filter((l) => l !== null && l !== undefined && l !== false)
     .join('\n');
 
-  let json;
-  let routed;
-  for (let attempt = 1; ; attempt++) {
-    try {
-      ({ json, routed } = await complete({ apiKey, model, user }));
-      break;
-    } catch (err) {
-      if (attempt >= 3 || err.fatal) throw err;
-    }
-  }
+  const { content, routed } = await chat({
+    apiKey,
+    model,
+    json: true,
+    messages: [
+      { role: 'system', content: SYSTEM },
+      { role: 'user', content: user },
+    ],
+  });
+  const start = content.indexOf('{');
+  if (start === -1) throw new Error('model returned no JSON');
+  const json = JSON.parse(content.slice(start, content.lastIndexOf('}') + 1));
   const keep = parseRanges(json.keep, blocks.length);
   if (!keep.size) throw new Error('model returned no content blocks');
 
@@ -73,38 +76,6 @@ export async function classifyWithJev({ blocks, meta, url, apiKey, model = DEFAU
     keep,
     via: routed ? `${model} → ${routed}` : model,
   };
-}
-
-async function complete({ apiKey, model, user }) {
-  const res = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'X-Title': 'netreader',
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: SYSTEM },
-        { role: 'user', content: user },
-      ],
-    }),
-    signal: AbortSignal.timeout(180_000),
-  });
-
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || body.error) {
-    const err = new Error(`OpenRouter ${res.status}: ${body.error?.message ?? res.statusText}`);
-    err.fatal = res.status === 401 || res.status === 402 || res.status === 403;
-    throw err;
-  }
-  const content = body.choices?.[0]?.message?.content ?? '';
-  const start = content.indexOf('{');
-  if (start === -1) throw new Error(`model returned no JSON (finish_reason: ${body.choices?.[0]?.finish_reason})`);
-  return { json: JSON.parse(content.slice(start, content.lastIndexOf('}') + 1)), routed: body.model };
 }
 
 /**

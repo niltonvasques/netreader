@@ -11,23 +11,26 @@ import { extract } from '../src/extract.js';
 import { fetchHtml, normalizeUrl } from '../src/fetch.js';
 import { runPager } from '../src/pager.js';
 import { layout } from '../src/render.js';
+import { DEFAULT_TLDR_MODEL, summarize, tldrArticle } from '../src/tldr.js';
 
 const USAGE = `Usage: netreader [options] <url>
 
 Read the main text of a web page in your terminal.
 
 Options:
-  -p, --print        Print the article to stdout instead of opening the reader
-  -r, --refresh      Ignore the cache and re-extract the page
-      --no-ai        Skip Jev and use the local heuristic extractor
-  -m, --model <id>   OpenRouter model (default: $NETREADER_MODEL or ${DEFAULT_MODEL})
-  -w, --width <n>    Maximum text width (default: 88)
-  -h, --help         Show this help
+  -p, --print            Print the article to stdout instead of opening the reader
+  -r, --refresh          Ignore the cache and re-extract the page
+      --no-ai            Skip Jev and use the local heuristic extractor
+  -m, --model <id>       OpenRouter model (default: $NETREADER_MODEL or ${DEFAULT_MODEL})
+  -w, --width <n>        Maximum text width (default: 88)
+  -t, --tldr             Print a TL;DR of the article instead of the article
+      --tldr-model <id>  TL;DR model (default: $NETREADER_TLDR_MODEL or ${DEFAULT_TLDR_MODEL})
+  -h, --help             Show this help
 
 Environment:
   OPENROUTER_API_KEY  Read from the environment, ./.env, or the netreader install's .env
 
-Keys: j/k ↑/↓ scroll · space/b page · d/u half page · g/G top/end · / search · n/N · q quit`;
+Keys: j/k ↑/↓ scroll · space/b page · d/u half page · g/G top/end · / search · n/N · +/- zoom · 0 reset zoom · t TL;DR · q quit`;
 
 const appDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const cacheDir = join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'netreader');
@@ -112,6 +115,22 @@ async function getArticle(url, opts) {
   }
 }
 
+async function getTldr(article, { apiKey, model, refresh, signal }) {
+  const file = cachePath(article.url, `tldr:${model}`);
+  let summary = null;
+  if (!refresh && existsSync(file)) {
+    try {
+      summary = JSON.parse(readFileSync(file, 'utf8')).summary;
+    } catch {}
+  }
+  if (!summary) {
+    summary = await summarize({ article, apiKey, model, signal });
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(file, JSON.stringify({ summary }));
+  }
+  return tldrArticle(article, summary, model);
+}
+
 async function main() {
   let args;
   try {
@@ -123,6 +142,8 @@ async function main() {
         'no-ai': { type: 'boolean' },
         model: { type: 'string', short: 'm' },
         width: { type: 'string', short: 'w' },
+        tldr: { type: 'boolean', short: 't' },
+        'tldr-model': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -152,14 +173,30 @@ async function main() {
     model: values.model || process.env.NETREADER_MODEL || DEFAULT_MODEL,
   });
 
-  if (values.print || !process.stdout.isTTY || !process.stdin.isTTY) {
+  const tldrModel = values['tldr-model'] || process.env.NETREADER_TLDR_MODEL || DEFAULT_TLDR_MODEL;
+  const tldrOpts = { apiKey, model: tldrModel, refresh: values.refresh };
+  if (values.tldr && !apiKey) throw new Error('--tldr needs OPENROUTER_API_KEY');
+
+  if (values.tldr || values.print || !process.stdout.isTTY || !process.stdin.isTTY) {
+    let doc = article;
+    if (values.tldr) {
+      const spin = spinner(`Summarizing with ${tldrModel}…`);
+      try {
+        doc = await getTldr(article, tldrOpts);
+      } finally {
+        spin.stop();
+      }
+    }
     const color = process.stdout.isTTY && !process.env.NO_COLOR;
     const cols = process.stdout.isTTY ? process.stdout.columns : 80;
-    const lines = layout(article, { width: Math.min(width, cols), color });
+    const lines = layout(doc, { width: Math.min(width, cols), color });
     process.stdout.write(lines.map((l) => (color ? l.ansi : l.plain)).join('\n') + '\n');
     return;
   }
-  await runPager(article, { maxWidth: width });
+  await runPager(article, {
+    maxWidth: width,
+    tldr: apiKey && { label: tldrModel, load: (signal) => getTldr(article, { ...tldrOpts, signal }) },
+  });
 }
 
 main().catch((err) => {

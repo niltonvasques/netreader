@@ -1,10 +1,20 @@
 import { layout, strWidth } from './render.js';
 
 const ESC = '\x1b[';
-const HELP = 'j/k ↑/↓ scroll · space/b page · g/G top/end · / search · n/N next/prev · q quit';
+const HELP = 'j/k ↑/↓ scroll · space/b page · g/G top/end · / search · n/N next/prev · +/- zoom · t TL;DR · q quit';
+const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const MIN_WIDTH = 24;
+const ZOOM_STEP = 8;
 
-export function runPager(article, { maxWidth = 88 } = {}) {
+/**
+ * `tldr` (optional): { label, load(signal) => Promise<article> } — produces the TL;DR view on demand.
+ */
+export function runPager(article, { maxWidth = 88, tldr = null } = {}) {
   const { stdin, stdout } = process;
+
+  let doc = article;
+  let articleTop = 0; // reading position saved while the TL;DR view is open
+  const summary = { state: 'idle', doc: null, wanted: false, frame: 0, timer: null, abort: new AbortController() };
 
   let lines = [];
   let top = 0;
@@ -12,17 +22,19 @@ export function runPager(article, { maxWidth = 88 } = {}) {
   let query = '';
   let prompt = null; // string while typing a search
   let message = '';
+  let textWidth = maxWidth;
 
   const rows = () => stdout.rows || 24;
   const cols = () => stdout.columns || 80;
   const page = () => rows() - 1;
   const maxTop = () => Math.max(0, lines.length - page());
+  const widestText = () => Math.max(MIN_WIDTH, cols() - 4);
 
   function relayout() {
     const anchor = lines.length ? top / lines.length : 0;
-    const width = Math.max(20, Math.min(maxWidth, cols() - 4));
+    const width = Math.max(MIN_WIDTH, Math.min(textWidth, widestText()));
     margin = Math.max(2, Math.floor((cols() - width) / 2));
-    lines = layout(article, { width, color: true });
+    lines = layout(doc, { width, color: true });
     top = Math.min(maxTop(), Math.round(anchor * lines.length));
   }
 
@@ -55,10 +67,65 @@ export function runPager(article, { maxWidth = 88 } = {}) {
     if (prompt !== null) return `/${prompt}${ESC}?25h`;
     const pct = lines.length <= page() ? 100 : Math.round(((top + page()) / lines.length) * 100);
     const right = ` ${Math.min(100, pct)}% `;
-    let left = ` ${message || HELP}`;
+    const loading = summary.state === 'loading' ? `${SPINNER[summary.frame % SPINNER.length]} Summarizing with ${tldr.label}… ` : '';
+    let left = ` ${message || loading || (doc === article ? HELP : 'TL;DR · t/q/Esc back to the article')}`;
     const room = cols() - strWidth(right);
     while (strWidth(left) > room) left = left.slice(0, -1);
     return `${ESC}?25l${ESC}7m${left}${' '.repeat(Math.max(0, room - strWidth(left)))}${right}${ESC}0m`;
+  }
+
+  // A terminal app cannot change the font size, so zoom narrows or widens the text column.
+  function zoom(dir) {
+    const current = Math.min(textWidth, widestText());
+    if (dir === 0) textWidth = maxWidth;
+    else textWidth = Math.max(MIN_WIDTH, Math.min(widestText(), current - dir * ZOOM_STEP));
+    relayout();
+    const width = Math.min(textWidth, widestText());
+    const pct = Math.round((maxWidth / width) * 100);
+    message = `Zoom ${pct}% · ${width} columns${width === widestText() ? ' (full width)' : width === MIN_WIDTH ? ' (max zoom)' : ''}`;
+  }
+
+  function showView(next, savedTop) {
+    doc = next;
+    lines = [];
+    relayout();
+    scrollTo(savedTop);
+  }
+
+  function toggleTldr() {
+    if (doc !== article) return showView(article, articleTop);
+    if (!tldr) {
+      message = 'TL;DR needs OPENROUTER_API_KEY';
+      return;
+    }
+    if (summary.state === 'ready') {
+      articleTop = top;
+      return showView(summary.doc, 0);
+    }
+    summary.wanted = true;
+    if (summary.state === 'loading') return;
+    summary.state = 'loading';
+    summary.timer = setInterval(() => {
+      summary.frame++;
+      if (prompt === null && !message) draw();
+    }, 100);
+    tldr.load(summary.abort.signal).then(
+      (result) => {
+        summary.state = 'ready';
+        summary.doc = result;
+        if (summary.wanted && doc === article) {
+          articleTop = top;
+          showView(result, 0);
+        }
+      },
+      (err) => {
+        summary.state = 'idle';
+        if (!summary.abort.signal.aborted) message = `TL;DR failed: ${err.message}`;
+      },
+    ).finally(() => {
+      clearInterval(summary.timer);
+      if (!summary.abort.signal.aborted) draw();
+    });
   }
 
   function scrollTo(n) {
@@ -81,6 +148,8 @@ export function runPager(article, { maxWidth = 88 } = {}) {
 
   return new Promise((resolve) => {
     function quit() {
+      summary.abort.abort();
+      clearInterval(summary.timer);
       stdout.off('resize', onResize);
       stdin.off('data', onData);
       stdin.setRawMode(false);
@@ -117,8 +186,13 @@ export function runPager(article, { maxWidth = 88 } = {}) {
       }
 
       switch (key) {
-        case 'q': case 'Q': case '\x03': case '\x1b':
+        case '\x03':
           return quit();
+        case 'q': case 'Q': case '\x1b':
+          if (doc === article) return quit();
+          toggleTldr(); break;
+        case 't': case 'T':
+          toggleTldr(); break;
         case 'j': case '\x1b[B': case '\x1bOB': case '\r': case '\x0e':
           scrollTo(top + 1); break;
         case 'k': case '\x1b[A': case '\x1bOA': case '\x10':
@@ -141,6 +215,12 @@ export function runPager(article, { maxWidth = 88 } = {}) {
           find(1); break;
         case 'N':
           find(-1); break;
+        case '+': case '=':
+          zoom(1); break;
+        case '-': case '_':
+          zoom(-1); break;
+        case '0':
+          zoom(0); break;
         case 'h': case '?':
           message = HELP; break;
         default:
