@@ -1,0 +1,16 @@
+{
+  "name": "netreader",
+  "version": "0.1.0",
+  "description": "Read the main text of any web page in your terminal",
+  "type": "module",
+  "bin": {
+    "netreader": "bin/netreader.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "^1.2.0"
+  }
+}
